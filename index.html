@@ -107,7 +107,14 @@
 
         async function setupCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: "environment",     // "environment" = cámara trasera
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } 
+                });
+                
                 video.srcObject = stream;
                 await new Promise(resolve => video.onloadedmetadata = resolve);
                 updateStatus("VIGILANCIA ACTIVA", "green");
