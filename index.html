@@ -107,13 +107,7 @@
 
         async function setupCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        facingMode: "environment",     // "environment" = cámara trasera
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 }
-                    } 
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 
                 video.srcObject = stream;
                 await new Promise(resolve => video.onloadedmetadata = resolve);
