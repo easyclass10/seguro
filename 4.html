@@ -135,7 +135,7 @@
                     ? "📷 Cambiar a Cámara Frontal" 
                     : "📷 Cambiar a Cámara Trasera";
 
-                setInterval(analyzeFrame, 60000);
+                setInterval(analyzeFrame, 30000);
             } catch (err) {
                 updateStatus("ERROR CRÍTICO", "red");
                 addLog("Error de cámara: " + err.message, 'alert');
@@ -205,7 +205,7 @@
             
             const prompt = `
 Actúa como sistema de vigilancia CCTV. Analiza esta imagen.
-Busca específicamente: personas forzando vehículos, robando autos, llantas, partes, armas o violencia.
+Busca específicamente: personas forzando vehículos, robando autos, llantas, partes, armas o violencia, incluso personas.
 Responde ÚNICAMENTE con JSON válido, sin explicaciones extras:
 
 {
@@ -314,4 +314,5 @@ Si no hay nada sospechoso: "description": "Sin actividad inusual"
         setupCamera();
     </script>
 </body>
+
 </html>
