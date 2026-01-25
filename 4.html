@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Vigilancia IA - Z.ai</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "@supabase/supabase-js": "https://esm.run/@supabase/supabase-js"
+        }
+      }
+    </script>
+    <style>
+        .log-entry { animation: fadeIn 0.3s ease-in; border-bottom: 1px solid #333; padding: 4px 0; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a202c; }
+        ::-webkit-scrollbar-thumb { background: #2f855a; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-gray-900 text-green-400 font-mono p-5 text-center min-h-screen flex flex-col items-center">
+
+    <h1 class="text-3xl font-bold mb-4 text-red-500 uppercase tracking-widest animate-pulse">⚠️ Sentinel AI Security (Z.ai)</h1>
+    
+    <div class="relative inline-block border-4 border-green-600 shadow-[0_0_20px_rgba(0,255,0,0.5)] bg-black">
+        <video id="webcam" autoplay playsinline class="w-[640px] max-w-full h-auto"></video>
+        <div id="recording-dot" class="absolute top-2 right-2 w-4 h-4 bg-red-600 rounded-full animate-pulse"></div>
+        <div class="absolute bottom-2 left-2 bg-black/70 px-2 py-1 text-xs text-white">CAM-01 LIVE REC</div>
+    </div>
+
+    <!-- Botón para cambiar cámara -->
+    <button id="switch-camera-btn" onclick="switchCamera()"
+            class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-bold text-lg flex items-center gap-2 mx-auto">
+        <span>📷</span>
+        Cambiar a Cámara Frontal
+    </button>
+
+    <div class="mt-6 w-full max-w-4xl bg-gray-800 border-2 border-gray-600 rounded-lg shadow-2xl overflow-hidden text-left">
+        <!-- ... resto del dashboard igual ... -->
+        <div class="bg-gray-700 p-2 border-b border-gray-600 flex justify-between items-center px-4">
+            <span class="font-bold text-white">🖥️ MONITOR DE ESTADO</span>
+            <span id="dash-clock" class="text-sm text-yellow-400">00:00:00</span>
+        </div>
+
+        <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-gray-900 p-3 rounded border border-gray-700">
+                <p class="text-xs text-gray-500 uppercase mb-1">Estado del Sistema</p>
+                <div id="dash-status" class="text-xl font-bold text-blue-400 flex items-center">
+                    <span class="inline-block w-3 h-3 bg-blue-500 rounded-full mr-2 animate-ping"></span>
+                    INICIANDO...
+                </div>
+            </div>
+
+            <div class="bg-gray-900 p-3 rounded border border-gray-700 md:col-span-2">
+                <p class="text-xs text-gray-500 uppercase mb-1">Análisis de Inteligencia Artificial</p>
+                <p id="dash-analysis" class="text-sm text-white italic leading-relaxed">
+                    Esperando primera captura...
+                </p>
+            </div>
+        </div>
+
+        <div class="bg-black border-t border-gray-600 p-2">
+            <p class="text-xs text-gray-500 mb-1 px-2">DB LOGS (Guardando todo):</p>
+            <div id="log-container" class="h-48 overflow-y-auto px-2 font-mono text-xs text-green-600"></div>
+        </div>
+    </div>
+
+    <canvas id="canvas" class="hidden"></canvas>
+    
+    <audio id="alarm-sound" loop preload="auto">
+        <source src="police-siren-sound-effect-317645.mp3" type="audio/mpeg">
+    </audio>
+
+    <script type="module">
+        import { createClient } from "@supabase/supabase-js";
+
+        // Configuración
+        const Z_AI_API_KEY = "sk-de39c97bca2a442fa9bd5c9ce0fd7981.4UYWTeTrE9EajOkk";
+        const Z_AI_MODEL = "glm-4.6v-flash";
+        const Z_AI_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+
+        const SUPABASE_URL = "https://yjnlfewsgksdsvsimdjs.supabase.co"; 
+        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlqbmxmZXdzZ2tzZHN2c2ltZGpzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3NTk4OTgsImV4cCI6MjA3OTMzNTg5OH0.ysDsAdyn3k2i51xnAkJFGKtEWpQ3laxWV7rpjvFIF8E"; 
+        
+        const BUCKET_NAME = "snapshots";
+        const TABLE_NAME = "security_logs";
+
+        let currentFacingMode = "environment"; // default: cámara trasera
+
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('canvas');
+        const alarmSound = document.getElementById('alarm-sound');
+        const dashStatus = document.getElementById('dash-status');
+        const dashAnalysis = document.getElementById('dash-analysis');
+        const dashClock = document.getElementById('dash-clock');
+        const logContainer = document.getElementById('log-container');
+        const switchBtn = document.getElementById('switch-camera-btn');
+
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        setInterval(() => { dashClock.innerText = new Date().toLocaleTimeString(); }, 1000);
+
+        function addLog(message, type = 'info') {
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString().split(' ')[0];
+            div.className = `log-entry ${type === 'alert' ? 'text-red-500 font-bold' : 'text-gray-400'}`;
+            let icon = type === 'db' ? '💾' : '>';
+            if(type === 'alert') icon = '🚨';
+            div.innerText = `[${time}] ${icon} ${message}`;
+            logContainer.prepend(div);
+        }
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: currentFacingMode,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } 
+                });
+                video.srcObject = stream;
+                await new Promise(resolve => video.onloadedmetadata = resolve);
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                const cameraName = currentFacingMode === "environment" ? "TRASERA" : "FRONTAL";
+                updateStatus(`VIGILANCIA ACTIVA (${cameraName})`, "green");
+                addLog(`Sistema iniciado con cámara ${cameraName.toLowerCase()}`, "info");
+
+                switchBtn.textContent = currentFacingMode === "environment" 
+                    ? "📷 Cambiar a Cámara Frontal" 
+                    : "📷 Cambiar a Cámara Trasera";
+
+                setInterval(analyzeFrame, 60000);
+            } catch (err) {
+                updateStatus("ERROR CRÍTICO", "red");
+                addLog("Error de cámara: " + err.message, 'alert');
+            }
+        }
+
+        async function switchCamera() {
+            if (!video.srcObject) return;
+
+            // Detener tracks actuales
+            video.srcObject.getTracks().forEach(track => track.stop());
+
+            // Cambiar modo
+            currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: currentFacingMode,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } 
+                });
+
+                video.srcObject = stream;
+                await new Promise(resolve => video.onloadedmetadata = resolve);
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                const cameraName = currentFacingMode === "environment" ? "TRASERA" : "FRONTAL";
+                updateStatus(`VIGILANCIA ACTIVA (${cameraName})`, "green");
+                addLog(`Cambiado a cámara ${cameraName.toLowerCase()}`, "info");
+
+                switchBtn.textContent = currentFacingMode === "environment" 
+                    ? "📷 Cambiar a Cámara Frontal" 
+                    : "📷 Cambiar a Cámara Trasera";
+
+            } catch (err) {
+                console.error(err);
+                addLog(`Error al cambiar cámara: ${err.message}`, 'alert');
+                updateStatus("ERROR AL CAMBIAR CÁMARA", "red");
+                
+                // Revertir modo si falla
+                currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+            }
+        }
+
+        function updateStatus(text, color) {
+            let colorClass = color === "red" ? "text-red-500" : (color === "green" ? "text-green-400" : "text-yellow-400");
+            let dotClass = color === "red" ? "bg-red-600" : (color === "green" ? "bg-green-500" : "bg-yellow-500");
+            dashStatus.className = `text-xl font-bold ${colorClass} flex items-center`;
+            dashStatus.innerHTML = `<span class="inline-block w-3 h-3 ${dotClass} rounded-full mr-2 animate-ping"></span> ${text}`;
+        }
+
+        // Resto de funciones (analyzeFrame, saveToDatabase, triggerAlarmUI) permanecen iguales
+        // ... (pega aquí tus funciones analyzeFrame, saveToDatabase y triggerAlarmUI del código anterior)
+
+        async function analyzeFrame() {
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.65); // data:image/jpeg;base64,...
+            const base64Data = dataUrl.split(',')[1];
+
+            updateStatus("ANALIZANDO CON Z.AI...", "yellow");
+            
+            const prompt = `
+Actúa como sistema de vigilancia CCTV. Analiza esta imagen.
+Busca específicamente: personas forzando vehículos, robando autos, llantas, partes, armas o violencia.
+Responde ÚNICAMENTE con JSON válido, sin explicaciones extras:
+
+{
+  "suspicious": true/false,
+  "description": "breve descripción de lo observado"
+}
+Si no hay nada sospechoso: "description": "Sin actividad inusual"
+`;
+
+            try {
+                const response = await fetch(Z_AI_API_URL, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${Z_AI_API_KEY}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        model: Z_AI_MODEL,
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    { type: "text", text: prompt },
+                                    {
+                                        type: "image_url",
+                                        image_url: { url: dataUrl }   // data URL completa
+                                    }
+                                ]
+                            }
+                        ],
+                        temperature: 0.3,
+                        max_tokens: 800,
+                        response_format: { type: "json_object" }
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    throw new Error(data.error.message || "Error en Z.ai");
+                }
+
+                const content = data.choices[0].message.content;
+                const analysis = JSON.parse(content);
+
+                dashAnalysis.innerText = analysis.description;
+
+                await saveToDatabase(analysis, canvas);
+
+                if (analysis.suspicious) {
+                    triggerAlarmUI(analysis.description);
+                } else {
+                    updateStatus("VIGILANCIA ACTIVA", "green");
+                    alarmSound.pause();
+                    alarmSound.currentTime = 0;
+                }
+
+            } catch (error) {
+                console.error(error);
+                addLog("Error Z.ai: " + error.message, 'alert');
+                updateStatus("ERROR EN ANÁLISIS", "red");
+            }
+        }
+
+        async function saveToDatabase(analysis, canvasElement) {
+            // ... (mantengo la misma función que tenías)
+            let publicUrl = null;
+
+            if (analysis.suspicious) {
+                try {
+                    const blob = await new Promise(resolve => canvasElement.toBlob(resolve, 'image/jpeg', 0.7));
+                    const fileName = `evidence_${Date.now()}.jpg`;
+                    
+                    const { error: uploadError } = await supabase.storage
+                        .from(BUCKET_NAME)
+                        .upload(fileName, blob);
+                    
+                    if (!uploadError) {
+                        const res = supabase.storage.from(BUCKET_NAME).getPublicUrl(fileName);
+                        publicUrl = res.data.publicUrl;
+                    }
+                } catch (e) { console.log("Error subiendo imagen", e); }
+            }
+
+            const { error } = await supabase
+                .from(TABLE_NAME)
+                .insert([{ 
+                    description: analysis.description, 
+                    is_suspicious: analysis.suspicious, 
+                    image_url: publicUrl 
+                }]);
+
+            if (error) {
+                addLog("Error guardando DB: " + error.message, 'alert');
+            } else {
+                addLog(`Guardado en DB: ${analysis.suspicious ? 'PELIGRO' : 'Normal'}`, 'db');
+            }
+        }
+
+        function triggerAlarmUI(description) {
+            updateStatus("¡AMENAZA DETECTADA!", "red");
+            dashAnalysis.className = "text-sm text-red-400 font-bold italic leading-relaxed animate-pulse";
+            alarmSound.play().catch(e => console.log("Audio bloqueado:", e));
+        }
+
+        setupCamera();
+    </script>
+</body>
+</html>
