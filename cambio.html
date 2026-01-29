@@ -70,7 +70,7 @@
 
         // === CAMBIO CRÍTICO: BAJAMOS EL UMBRAL A 0.25 ===
         // Esto permite detectar personas aunque la IA no esté 100% segura (ej. movimiento/borroso)
-        const CONFIDENCE_THRESHOLD = 0.25; 
+        const CONFIDENCE_THRESHOLD = 0.3; 
         
         const MODEL_ASSET_PATH = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite";
         
@@ -293,5 +293,6 @@
 </body>
 
 </html>
+
 
 
