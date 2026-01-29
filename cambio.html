@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinel Pro - Alta Sensibilidad</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        .log-entry { animation: fadeIn 0.3s ease-in; border-bottom: 1px solid #333; padding: 4px 0; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        canvas { position: absolute; top: 0; left: 0; z-index: 10; pointer-events: none; width: 100%; height: 100%; }
+        video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); /* Efecto espejo opcional */ }
+        /* Animación para el botón de alarma */
+        @keyframes panic { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        .panic-btn { animation: panic 0.5s infinite; }
+    </style>
+</head>
+<body class="bg-gray-900 text-cyan-400 font-mono p-4 text-center min-h-screen flex flex-col items-center">
+
+    <h1 class="text-2xl font-bold mb-3 text-cyan-500 uppercase tracking-widest">👁️ Sentinel V2 (Alta Sensibilidad)</h1>
+    
+    <div class="relative w-full max-w-[640px] aspect-[4/3] border-4 border-cyan-700 shadow-[0_0_30px_rgba(0,255,255,0.3)] bg-black rounded-lg overflow-hidden">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="detection-canvas"></canvas>
+        
+        <div class="absolute top-3 right-3 flex gap-2">
+            <div id="loading-spinner" class="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+        
+        <div id="alarm-overlay" class="hidden absolute inset-0 bg-red-500/30 flex items-center justify-center z-20">
+            <div class="bg-black/80 p-4 rounded-xl border-2 border-red-500 text-red-500 font-bold text-2xl animate-pulse">
+                🚨 PERSONA DETECTADA 🚨<br>
+                <span class="text-sm text-white">Alarma activa por 5 min...</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 justify-center mt-4 w-full max-w-md">
+        <button onclick="window.switchCamera()" class="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-lg font-bold border border-gray-600">
+            <span>🔄</span> Cámara
+        </button>
+
+        <button id="wakelock-btn" onclick="window.toggleWakeLock()" class="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-lg font-bold border border-yellow-600/50">
+            <span>⚡</span> Pantalla: <span id="wake-state">OFF</span>
+        </button>
+    </div>
+
+    <button id="stop-alarm-btn" onclick="window.stopAlarmManually()" class="hidden w-full max-w-md mt-3 bg-red-600 hover:bg-red-700 text-white py-4 rounded-xl font-bold text-xl border-4 border-red-800 panic-btn shadow-[0_0_20px_red]">
+        🔕 DETENER ALARMA YA
+    </button>
+
+    <div class="mt-3 flex gap-2 justify-center w-full max-w-md">
+        <div class="bg-gray-800/80 p-2 rounded border border-gray-700 w-full">
+            <p class="text-[10px] text-gray-500 uppercase">Estado IA</p>
+            <div id="ai-status" class="text-sm font-bold text-yellow-400">Cargando modelos...</div>
+        </div>
+    </div>
+
+    <div class="mt-3 w-full max-w-md bg-black/50 border border-gray-800 p-2 text-left h-24 overflow-y-auto rounded" id="log-container">
+        <div class="text-gray-600 text-[10px] mb-1">--- REGISTRO DE EVENTOS ---</div>
+    </div>
+
+    <audio id="alarm-sound" loop preload="auto">
+        <source src="https://www.soundjay.com/mechanical/sounds/smoke-detector-1.mp3" type="audio/mp3">
+    </audio>
+
+    <script type="module">
+        import { ObjectDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/+esm";
+
+        // === CAMBIO CRÍTICO: BAJAMOS EL UMBRAL A 0.25 ===
+        // Esto permite detectar personas aunque la IA no esté 100% segura (ej. movimiento/borroso)
+        const CONFIDENCE_THRESHOLD = 0.25; 
+        
+        const MODEL_ASSET_PATH = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite";
+        
+        // === CONFIGURACIÓN DE TIEMPO ===
+        const ALARM_DURATION_MS = 300000; // 5 Minutos
+        let alarmTimeout = null;
+
+        let objectDetector = null;
+        let runningMode = "VIDEO";
+        let lastVideoTime = -1;
+        let isAlarmActive = false;
+        let wakeLock = null;
+        let currentFacingMode = "environment";
+
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('detection-canvas');
+        const ctx = canvas.getContext('2d');
+        const aiStatus = document.getElementById('ai-status');
+        const logContainer = document.getElementById('log-container');
+        const alarmSound = document.getElementById('alarm-sound');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const alarmOverlay = document.getElementById('alarm-overlay');
+        const stopBtn = document.getElementById('stop-alarm-btn');
+
+        function addLog(msg, type='info') {
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString().split(' ')[0];
+            div.className = `log-entry ${type === 'alert' ? 'text-red-500 font-bold' : 'text-gray-400'} text-xs`;
+            div.innerText = `[${time}] ${msg}`;
+            logContainer.prepend(div);
+        }
+
+        // 1. INICIALIZAR MOTOR IA
+        async function initializeObjectDetector() {
+            try {
+                addLog("Iniciando IA...", "info");
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm"
+                );
+                objectDetector = await ObjectDetector.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: MODEL_ASSET_PATH, delegate: "GPU" },
+                    scoreThreshold: CONFIDENCE_THRESHOLD,
+                    runningMode: runningMode
+                });
+                loadingSpinner.style.display = 'none';
+                aiStatus.innerText = "VIGILANCIA ALTA SENSIBILIDAD";
+                aiStatus.className = "text-sm font-bold text-green-400";
+                renderLoop();
+            } catch (error) {
+                addLog("Error Fatal IA: " + error.message, "alert");
+                aiStatus.innerText = "ERROR";
+                aiStatus.className = "text-sm font-bold text-red-500";
+            }
+        }
+
+        // 2. BUCLE DE DETECCIÓN
+        async function renderLoop() {
+            if (!objectDetector || !video || video.readyState < 2) {
+                requestAnimationFrame(renderLoop);
+                return;
+            }
+
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                try {
+                    const detections = objectDetector.detectForVideo(video, performance.now());
+                    displayVideoDetections(detections);
+                } catch(e) {}
+            }
+            requestAnimationFrame(renderLoop);
+        }
+
+        function displayVideoDetections(result) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let personDetected = false;
+
+            for (let detection of result.detections) {
+                const category = detection.categories[0];
+                const label = category.categoryName.toLowerCase(); // Convertimos a minúsculas
+                const score = Math.round(category.score * 100);
+                const box = detection.boundingBox;
+
+                // Verificación más robusta
+                if (label === 'person') {
+                    personDetected = true;
+                    
+                    // Dibujo ROJO ALERTA
+                    ctx.strokeStyle = '#FF0000'; 
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(box.originX, box.originY, box.width, box.height);
+                    
+                    // Fondo etiqueta
+                    ctx.fillStyle = '#FF0000';
+                    ctx.fillRect(box.originX, box.originY - 25, box.width, 25);
+                    
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.fillText(`PERSONA ${score}%`, box.originX + 5, box.originY - 7);
+                } else {
+                    // === MODO DEBUG ===
+                    // Dibujamos otros objetos en GRIS tenue para saber que la IA funciona
+                    // Esto te ayuda a ver si detecta "sillas", "vasos", etc.
+                    ctx.strokeStyle = 'rgba(100, 100, 100, 0.3)'; 
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(box.originX, box.originY, box.width, box.height);
+                    ctx.fillStyle = 'rgba(200, 200, 200, 0.5)';
+                    ctx.font = '12px Arial';
+                    ctx.fillText(`${label} ${score}%`, box.originX, box.originY - 5);
+                }
+            }
+            
+            triggerAlarmLogic(personDetected);
+        }
+
+        // === 3. LÓGICA DE ALARMA ===
+        function triggerAlarmLogic(isPerson) {
+            if (isPerson) {
+                if (!isAlarmActive) {
+                    isAlarmActive = true;
+                    
+                    // Intentamos reproducir sonido
+                    alarmSound.play().then(() => {
+                        addLog("🔊 Audio reproduciendo");
+                    }).catch(e => {
+                        addLog("⚠️ Click en pantalla para habilitar audio", "alert");
+                    });
+
+                    if (navigator.vibrate) navigator.vibrate([500, 200, 500, 200, 500]);
+                    
+                    aiStatus.innerText = "⚠️ INTRUSO DETECTADO";
+                    aiStatus.className = "text-sm font-bold text-red-500 animate-pulse";
+                    alarmOverlay.classList.remove('hidden');
+                    stopBtn.classList.remove('hidden');
+                    addLog("🚨 ALARMA INICIADA (5 MIN)", "alert");
+                }
+
+                // Reiniciamos el temporizador si sigue detectando a la persona
+                if (alarmTimeout) clearTimeout(alarmTimeout);
+                alarmTimeout = setTimeout(() => {
+                    stopAlarmAutomatic();
+                }, ALARM_DURATION_MS);
+            }
+        }
+
+        function stopAlarmAutomatic() {
+            addLog("⏰ Tiempo finalizado. Silenciando.", "info");
+            resetAlarmState();
+        }
+
+        function resetAlarmState() {
+            isAlarmActive = false;
+            alarmSound.pause();
+            alarmSound.currentTime = 0;
+            if (alarmTimeout) clearTimeout(alarmTimeout);
+            alarmTimeout = null;
+
+            aiStatus.innerText = "VIGILANCIA ALTA SENSIBILIDAD";
+            aiStatus.className = "text-sm font-bold text-green-400";
+            alarmOverlay.classList.add('hidden');
+            stopBtn.classList.add('hidden');
+        }
+
+        // 4. FUNCIONES GLOBALES
+        window.stopAlarmManually = function() {
+            addLog("🔕 Alarma detenida manualmente.", "info");
+            resetAlarmState();
+        };
+
+        window.setupCamera = async function() {
+            try {
+                if (video.srcObject) {
+                    const tracks = video.srcObject.getTracks();
+                    tracks.forEach(t => t.stop());
+                }
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: currentFacingMode, width: { ideal: 640 }, height: { ideal: 480 } },
+                    audio: false
+                });
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", () => {
+                   if(!objectDetector) initializeObjectDetector();
+                });
+            } catch (err) {
+                addLog("Error Camara: " + err.message, "alert");
+                alert("Error: Asegúrate de dar permisos de cámara y usar HTTPS o Localhost.");
+            }
+        };
+
+        window.switchCamera = function() {
+            currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+            window.setupCamera();
+        };
+
+        window.toggleWakeLock = async function() {
+            if (!('wakeLock' in navigator)) return alert("No soportado en este navegador");
+            try {
+                if (wakeLock) {
+                    await wakeLock.release();
+                    wakeLock = null;
+                    document.getElementById('wake-state').innerText = "OFF";
+                } else {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    document.getElementById('wake-state').innerText = "ON";
+                }
+            } catch (e) { console.error(e); }
+        };
+
+        // Iniciar al tocar cualquier parte (hack para navegadores móviles y audio)
+        document.body.addEventListener('click', () => {
+            if(audioContext && audioContext.state === 'suspended') audioContext.resume();
+        }, {once:true});
+
+        window.setupCamera();
+    </script>
+</body>
+</html>
