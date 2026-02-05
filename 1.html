@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sistema de Vigilancia IA - Z.ai (Gemini 2.0)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .log-entry { animation: fadeIn 0.3s ease-in; border-bottom: 1px solid #333; padding: 4px 0; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a202c; }
+        ::-webkit-scrollbar-thumb { background: #2f855a; border-radius: 4px; }
+        html, body { overscroll-behavior-y: contain; touch-action: manipulation; }
+    </style>
+</head>
+<body class="bg-gray-900 text-green-400 font-mono p-5 text-center min-h-screen flex flex-col items-center select-none">
+    <h1 class="text-3xl font-bold mb-4 text-red-500 uppercase tracking-widest animate-pulse">⚠️ Sentinel AI Security</h1>
+    
+    <div class="relative inline-block border-4 border-green-600 shadow-[0_0_20px_rgba(0,255,0,0.5)] bg-black">
+        <video id="webcam" autoplay playsinline webkit-playsinline muted class="w-[640px] max-w-full h-auto transform scale-x-[-1]"></video>
+        <div id="recording-dot" class="absolute top-2 right-2 w-4 h-4 bg-red-600 rounded-full animate-pulse"></div>
+        <div class="absolute bottom-2 left-2 bg-black/70 px-2 py-1 text-xs text-white">CAM-01 LIVE REC</div>
+    </div>
+
+    <button id="switch-camera-btn" onclick="switchCamera()" class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-bold text-lg flex items-center gap-2 mx-auto touch-manipulation">
+        <span>📷</span> Cambiar a Cámara Frontal
+    </button>
+    <button id="wake-lock-btn" onclick="toggleWakeLock()" class="mt-3 bg-amber-600 hover:bg-amber-700 text-white px-8 py-3 rounded-lg font-bold flex items-center gap-2 mx-auto touch-manipulation">
+        🔋 Mantener pantalla encendida
+    </button>
+    <div id="wake-status" class="text-xs mt-1 text-yellow-400"></div>
+
+    <div class="mt-4 w-full max-w-md mx-auto bg-gray-800 border border-green-700 rounded-xl p-3">
+        <label class="block text-xs text-gray-400 mb-1 font-medium">Cosas adicionales a detectar (manual):</label>
+        <form onsubmit="event.preventDefault(); updateCustomDetections();" class="flex gap-2">
+            <input id="custom-detect-input" type="text" class="flex-1 bg-black border border-green-700 text-green-400 px-3 py-2.5 text-sm rounded-lg font-mono placeholder:text-green-900 focus:outline-none focus:border-green-500" placeholder="persona armada, incendio, ventana rota">
+            <button type="submit" class="bg-green-600 hover:bg-green-700 px-5 rounded-lg font-bold text-white text-sm whitespace-nowrap touch-manipulation">ACTUALIZAR</button>
+        </form>
+        <div id="custom-status" class="text-[10px] text-green-600 mt-1.5 min-h-[1.2em]"></div>
+    </div>
+
+    <div class="mt-6 w-full max-w-4xl bg-gray-800 border-2 border-gray-600 rounded-lg shadow-2xl overflow-hidden text-left">
+        <div class="bg-gray-700 p-2 border-b border-gray-600 flex justify-between items-center px-4">
+            <span class="font-bold text-white">🖥️ MONITOR DE ESTADO</span>
+            <div>
+                <button onclick="clearLocalLogs()" class="text-[10px] bg-red-900 text-white px-2 py-1 rounded mr-2 hover:bg-red-700">BORRAR LOGS</button>
+                <span id="dash-clock" class="text-sm text-yellow-400">00:00:00</span>
+            </div>
+        </div>
+        <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-gray-900 p-3 rounded border border-gray-700">
+                <p class="text-xs text-gray-500 uppercase mb-1">Estado del Sistema</p>
+                <div id="dash-status" class="text-xl font-bold text-blue-400 flex items-center">
+                    <span class="inline-block w-3 h-3 bg-blue-500 rounded-full mr-2 animate-ping"></span>
+                    INICIANDO...
+                </div>
+            </div>
+            <div class="bg-gray-900 p-3 rounded border border-gray-700 md:col-span-2">
+                <p class="text-xs text-gray-500 uppercase mb-1">Análisis de Gemini 2.0 Flash</p>
+                <div id="dash-analysis" class="text-sm text-white italic leading-relaxed min-h-[3rem] font-mono">
+                    Esperando primera captura...
+                </div>
+            </div>
+        </div>
+        <div class="bg-black border-t border-gray-600 p-2">
+            <p class="text-xs text-gray-500 mb-1 px-2">LOGS DE ACTIVIDAD (Visualización Local):</p>
+            <div id="log-container" class="h-48 overflow-y-auto px-2 font-mono text-xs text-green-600"></div>
+        </div>
+    </div>
+
+    <canvas id="canvas" class="hidden"></canvas>
+    <audio id="alarm-sound" loop preload="auto">
+        <source src="https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg" type="audio/ogg">
+    </audio>
+
+    <script>
+        // === CONFIGURACIÓN ===
+        const RENDER_API_URL = "https://seguridad-thxq.onrender.com/analyze"; 
+        
+        let currentFacingMode = "environment";
+        let customDetectionPrompt = localStorage.getItem('savedPrompt') || "";
+        let wakeLock = null;
+        let isAnalyzing = false;
+        let analysisTimer = null;
+
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('canvas');
+        const alarmSound = document.getElementById('alarm-sound');
+        const dashStatus = document.getElementById('dash-status');
+        const dashAnalysis = document.getElementById('dash-analysis');
+        const dashClock = document.getElementById('dash-clock');
+        const logContainer = document.getElementById('log-container');
+        const customInput = document.getElementById('custom-detect-input');
+
+        if(customDetectionPrompt) {
+            customInput.value = customDetectionPrompt;
+            document.getElementById('custom-status').textContent = `✅ Restaurado: ${customDetectionPrompt}`;
+        }
+        
+        window.addEventListener('beforeunload', function (e) { e.preventDefault(); e.returnValue = ''; });
+        loadLocalLogs();
+        setInterval(() => { dashClock.innerText = new Date().toLocaleTimeString(); }, 1000);
+
+        function addLog(message, type = 'info') {
+            const time = new Date().toLocaleTimeString().split(' ')[0];
+            const logEntry = { time, message, type };
+            renderLog(logEntry);
+            saveLogToLocal(logEntry);
+        }
+
+        function renderLog({ time, message, type }) {
+            const div = document.createElement('div');
+            div.className = `log-entry ${type === 'alert' ? 'text-red-500 font-bold' : 'text-gray-400'}`;
+            let icon = '>';
+            if (type === 'alert') icon = '🚨';
+            if (type === 'db') icon = '☁️'; 
+            div.innerText = `[${time}] ${icon} ${message}`;
+            logContainer.prepend(div);
+            if (logContainer.children.length > 50) logContainer.lastChild.remove();
+        }
+
+        function saveLogToLocal(entry) {
+            let logs = JSON.parse(localStorage.getItem('securityLogs') || "[]");
+            logs.unshift(entry);
+            if (logs.length > 100) logs.pop();
+            localStorage.setItem('securityLogs', JSON.stringify(logs));
+        }
+
+        function loadLocalLogs() {
+            let logs = JSON.parse(localStorage.getItem('securityLogs') || "[]");
+            [...logs].reverse().forEach(log => renderLog(log));
+        }
+
+        window.clearLocalLogs = function() {
+            localStorage.removeItem('securityLogs');
+            logContainer.innerHTML = '';
+            addLog("Logs locales borrados", "info");
+        }
+
+        window.updateCustomDetections = function() {
+            customDetectionPrompt = document.getElementById('custom-detect-input').value.trim();
+            localStorage.setItem('savedPrompt', customDetectionPrompt);
+            const statusEl = document.getElementById('custom-status');
+            if (customDetectionPrompt) {
+                statusEl.textContent = `✅ Activado: ${customDetectionPrompt}`;
+                addLog(`Detecciones actualizadas: ${customDetectionPrompt}`, 'info');
+            } else {
+                statusEl.textContent = 'Sin detecciones personalizadas';
+                addLog('Detecciones personalizadas desactivadas', 'info');
+            }
+            document.getElementById('custom-detect-input').blur();
+        }
+
+        function updateStatus(text, color) {
+            let colorClass = color === "red" ? "text-red-500" : (color === "green" ? "text-green-400" : "text-yellow-400");
+            let dotClass = color === "red" ? "bg-red-600" : (color === "green" ? "bg-green-500" : "bg-yellow-500");
+            dashStatus.className = `text-xl font-bold ${colorClass} flex items-center`;
+            dashStatus.innerHTML = `<span class="inline-block w-3 h-3 ${dotClass} rounded-full mr-2 animate-ping"></span> ${text}`;
+        }
+
+        async function analyzeFrame() {
+            if (isAnalyzing) return;
+
+            const ctx = canvas.getContext('2d');
+            if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+            if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.4); 
+
+            isAnalyzing = true;
+            updateStatus("ENVIANDO A GEMINI...", "yellow");
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+                const response = await fetch(RENDER_API_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        image: dataUrl,
+                        customPrompt: customDetectionPrompt
+                    }),
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+
+                if (!response.ok) throw new Error(`Server Status: ${response.status}`);
+                
+                const analysis = await response.json();
+                if (analysis.error) throw new Error(analysis.error);
+
+                dashAnalysis.innerHTML = `
+                    <span class="font-bold text-yellow-400">Gemini ve:</span><br>
+                    ${analysis.description}<br>
+                    <span class="text-xs ${analysis.suspicious ? 'text-red-400' : 'text-green-400'}">
+                        Suspicious: ${analysis.suspicious ? 'SÍ' : 'NO'}
+                    </span>
+                `;
+
+                if (analysis.suspicious) {
+                    triggerAlarmUI(analysis.description);
+                    addLog("🚨 AMENAZA DETECTADA", "alert");
+                } else {
+                    updateStatus("VIGILANCIA ACTIVA", "green");
+                    alarmSound.pause();
+                    alarmSound.currentTime = 0;
+                }
+                // Logueamos que se guardó en DB (ahora el backend siempre guarda)
+                addLog("Info enviada a Base de Datos", "db");
+
+            } catch (error) {
+                console.error(error);
+                let msg = error.name === 'AbortError' ? 'Tiempo de espera agotado' : error.message;
+                addLog("Error: " + msg, 'alert');
+                updateStatus("REINTENTANDO...", "red");
+            } finally {
+                isAnalyzing = false;
+                if(analysisTimer) clearTimeout(analysisTimer);
+                // === CAMBIO AQUÍ: 5000ms = 5 segundos ===
+                analysisTimer = setTimeout(analyzeFrame, 5000); 
+            }
+        }
+
+        function triggerAlarmUI(description) {
+            updateStatus("¡AMENAZA DETECTADA!", "red");
+            dashAnalysis.className = "text-sm text-red-400 font-bold italic leading-relaxed animate-pulse";
+            alarmSound.play().catch(e => console.log("Audio bloqueado:", e));
+        }
+
+        async function setupCamera() {
+            try {
+                const constraints = {
+                    video: { facingMode: currentFacingMode, width: { ideal: 640 }, height: { ideal: 480 } }
+                };
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                await new Promise((resolve) => { video.onloadedmetadata = () => { resolve(); }; });
+                video.play();
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                
+                if (currentFacingMode === 'user') { video.classList.add('scale-x-[-1]'); }
+                else { video.classList.remove('scale-x-[-1]'); }
+                
+                updateStatus(`CÁMARA LISTA`, "green");
+                addLog(`Sistema iniciado`, "info");
+                analyzeFrame();
+            } catch (err) {
+                updateStatus("ERROR CAMARA", "red");
+                addLog("No se pudo acceder a la cámara: " + err.message, 'alert');
+            }
+        }
+
+        window.switchCamera = async function() {
+            if(analysisTimer) clearTimeout(analysisTimer);
+            if (video.srcObject) { video.srcObject.getTracks().forEach(track => track.stop()); }
+            currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+            const constraints = { video: { facingMode: currentFacingMode, width: { ideal: 640 }, height: { ideal: 480 } } };
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                await new Promise(r => video.onloadedmetadata = r);
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                if (currentFacingMode === 'user') { video.classList.add('scale-x-[-1]'); }
+                else { video.classList.remove('scale-x-[-1]'); }
+                addLog(`Cámara cambiada a: ${currentFacingMode}`, "info");
+                analyzeFrame();
+            } catch(e) { addLog("Error cambiando cámara", "alert"); }
+        }
+
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    document.getElementById('wake-status').textContent = "✅ Pantalla bloqueada";
+                    updateWakeButton(true);
+                    wakeLock.addEventListener('release', () => { document.getElementById('wake-status').textContent = "⚠️ Bloqueo liberado"; updateWakeButton(false); });
+                }
+            } catch (err) { console.log(err); }
+        }
+
+        function releaseWakeLock() { if (wakeLock) { wakeLock.release(); wakeLock = null; } updateWakeButton(false); }
+
+        function updateWakeButton(active) {
+            const btn = document.getElementById('wake-lock-btn');
+            if (active) {
+                btn.textContent = "🔋 Apagar bloqueo de pantalla";
+                btn.classList.replace('bg-amber-600', 'bg-red-600');
+                btn.classList.replace('hover:bg-amber-700', 'hover:bg-red-700');
+            } else {
+                btn.textContent = "🔋 Mantener pantalla encendida";
+                btn.classList.replace('bg-red-600', 'bg-amber-600');
+                btn.classList.replace('hover:bg-red-700', 'hover:bg-amber-700');
+            }
+        }
+
+        window.toggleWakeLock = async function() { if (wakeLock) releaseWakeLock(); else await requestWakeLock(); }
+
+        document.addEventListener('visibilitychange', async () => { if (wakeLock && document.visibilityState === 'visible') { await requestWakeLock(); } });
+
+        setupCamera();
+    </script>
+</body>
+</html>
