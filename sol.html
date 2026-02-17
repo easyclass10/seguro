@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="icon" href="data:,">
+    <title>Sentinel Ultra v4.0 - High Sensitivity</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .log-entry { animation: fadeIn 0.2s ease-in; border-bottom: 1px solid #333; padding: 4px 0; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        html, body { overscroll-behavior-y: contain; touch-action: manipulation; background: #080808; }
+        #roi-canvas { cursor: crosshair; touch-action: none; }
+        input[type=range] { accent-color: #ef4444; }
+        .scanning-line {
+            width: 100%; height: 2px; background: rgba(239, 68, 68, 0.5);
+            position: absolute; top: 0; left: 0; animation: scan 3s linear infinite;
+            pointer-events: none;
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+    </style>
+</head>
+<body class="text-green-400 font-mono p-4 text-center min-h-screen flex flex-col items-center select-none">
+    
+    <h1 class="text-2xl font-bold mb-3 text-red-600 uppercase tracking-tighter">🛡️ Sentinel Ultra v4.0</h1>
+    
+    <div id="audio-guard" class="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center p-6 text-center">
+        <div class="mb-8 p-6 border-2 border-red-600 rounded-xl shadow-[0_0_30px_rgba(220,38,38,0.3)]">
+            <h2 class="text-red-500 font-black text-2xl mb-4">SISTEMA DE VIGILANCIA</h2>
+            <p class="text-xs text-gray-400 max-w-xs mx-auto mb-6">Se requiere autorización para activar la cámara, el bloqueo de pantalla y la alarma sonora de 3 ciclos.</p>
+            <button onclick="initSystem()" class="bg-red-600 hover:bg-red-700 text-white text-xl font-black py-5 px-10 rounded-full shadow-2xl transition-all transform active:scale-90 animate-pulse">
+                INICIAR CENTINELA
+            </button>
+        </div>
+    </div>
+
+    <div class="relative inline-block border-2 border-red-600 bg-black rounded-lg overflow-hidden shadow-[0_0_20px_rgba(255,0,0,0.2)]">
+        <video id="webcam" autoplay playsinline muted class="w-[540px] max-w-full h-auto"></video>
+        <canvas id="roi-canvas" class="absolute top-0 left-0 w-full h-full"></canvas>
+        <div class="scanning-line"></div>
+        <div id="recording-dot" class="absolute top-3 right-3 w-3 h-3 bg-red-600 rounded-full animate-ping"></div>
+        <div class="absolute bottom-2 left-2 bg-black/80 px-2 py-1 text-[9px] text-white border border-red-900">
+            MODO: <span id="roi-status-text">ESCANEO TOTAL</span>
+        </div>
+    </div>
+
+    <div class="flex gap-2 mt-4 flex-wrap justify-center">
+        <button id="wake-lock-btn" onclick="toggleWakeLock()" class="bg-amber-600 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition-colors">
+            🔋 MANTENER PANTALLA ON
+        </button>
+        <button onclick="switchCamera()" class="bg-zinc-800 text-white px-4 py-2 rounded-lg text-xs font-bold border border-zinc-600">📷 GIRAR</button>
+        <button onclick="resetROI()" class="bg-zinc-800 text-white px-4 py-2 rounded-lg text-xs font-bold border border-zinc-600">🔄 RESET ZONA</button>
+    </div>
+
+    <div class="mt-4 w-full max-w-md bg-zinc-900/50 border border-zinc-800 rounded-xl p-4">
+        <div class="flex justify-between text-[10px] mb-3 font-bold text-red-500">
+            <span>SENSIBILIDAD DE PÍXEL (UMBRAL)</span>
+            <span id="range-val" class="bg-red-900/30 px-2 rounded">15</span>
+        </div>
+        <input id="threshold-range" type="range" min="2" max="50" value="15" class="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer">
+        <p class="text-[9px] text-gray-500 mt-2 text-left italic">* Valores bajos aumentan la detección de movimientos pequeños.</p>
+    </div>
+
+    <div class="mt-4 w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl">
+        <div class="bg-zinc-800/80 p-2 flex justify-between items-center px-4">
+            <span id="dash-status" class="text-[10px] font-bold flex items-center text-green-500 uppercase tracking-widest">
+                <span class="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span> Sistema en Espera
+            </span>
+            <span id="dash-clock" class="text-[10px] text-yellow-500 font-mono">00:00:00</span>
+        </div>
+        <div id="log-container" class="p-3 bg-black h-28 overflow-y-auto text-[10px] text-zinc-500 font-mono"></div>
+    </div>
+
+    <audio id="alarm-sound" preload="auto">
+        <source src="https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg" type="audio/ogg">
+    </audio>
+
+<script>
+    // Configuración de Sensibilidad Extrema
+    let PIXEL_THRESHOLD = 15; 
+    const AREA_PERCENTAGE = 0.002; // Solo se necesita que cambie el 1% del área (Sensible)
+    
+    let audioUnlocked = false;
+    let previousFrameData = null;
+    let currentFacingMode = "environment";
+    let roi = null;
+    let isDrawing = false;
+    let startX, startY;
+    let wakeLock = null;
+
+    // Control de Alarma de 3 Ciclos
+    let alarmCount = 0;
+    let isAlarmRunning = false;
+
+    const video = document.getElementById('webcam');
+    const roiCanvas = document.getElementById('roi-canvas');
+    const hiddenCanvas = document.createElement('canvas');
+    const alarmAudio = document.getElementById('alarm-sound');
+    const dashStatus = document.getElementById('dash-status');
+    const logContainer = document.getElementById('log-container');
+
+    // Inicialización del Sistema
+    function initSystem() {
+        alarmAudio.play().then(() => {
+            alarmAudio.pause();
+            alarmAudio.currentTime = 0;
+            audioUnlocked = true;
+            document.getElementById('audio-guard').style.display = 'none';
+            addLog("Sistema inicializado. Audio y sensor listos.");
+            setupCamera();
+        }).catch(err => {
+            console.error("Audio block:", err);
+            alert("Por favor, permite el acceso al audio.");
+        });
+    }
+
+    // Lógica Wake Lock
+    async function toggleWakeLock() {
+        const btn = document.getElementById('wake-lock-btn');
+        if (wakeLock !== null) {
+            await wakeLock.release();
+            wakeLock = null;
+            btn.classList.replace('bg-green-600', 'bg-amber-600');
+            btn.innerText = "🔋 MANTENER PANTALLA ON";
+            addLog("Ahorro de energía activado");
+        } else {
+            try {
+                wakeLock = await navigator.wakeLock.request('screen');
+                btn.classList.replace('bg-amber-600', 'bg-green-600');
+                btn.innerText = "💡 PANTALLA SIEMPRE ON";
+                addLog("Bloqueo de pantalla activo ✅");
+            } catch (err) {
+                addLog("Error: Wake Lock no soportado");
+            }
+        }
+    }
+
+    // Lógica de Repetición Triple
+    alarmAudio.onended = function() {
+        if (alarmCount < 0) { 
+            alarmCount++;
+            setTimeout(() => { 
+                alarmAudio.play(); 
+                addLog(`Alerta: Repetición ${alarmCount + 1}/3`);
+            }, 100);
+        } else {
+            isAlarmRunning = false;
+            alarmCount = 0;
+            addLog("Ciclo de alerta completado.");
+        }
+    };
+
+    function startAlarmSequence() {
+        if (!audioUnlocked || isAlarmRunning) return;
+        isAlarmRunning = true;
+        alarmCount = 0;
+        addLog("🚨 ALERTA: Movimiento detectado", "alert");
+        alarmAudio.play();
+    }
+
+    // Bucle de Análisis de Movimiento
+    function analyze() {
+        const vW = video.videoWidth;
+        const vH = video.videoHeight;
+        if (vW === 0) { requestAnimationFrame(analyze); return; }
+
+        const area = roi || { x: 0, y: 0, w: 1, h: 1 };
+        const ctx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+        
+        // Análisis a 80x80 para velocidad
+        hiddenCanvas.width = 80; hiddenCanvas.height = 80;
+        ctx.drawImage(video, area.x * vW, area.y * vH, area.w * vW, area.h * vH, 0, 0, 80, 80);
+        const currentFrame = ctx.getImageData(0, 0, 80, 80).data;
+
+        let pixelsChanged = 0;
+        if (previousFrameData) {
+            for (let i = 0; i < currentFrame.length; i += 4) {
+                const brightnessOld = (previousFrameData[i] + previousFrameData[i+1] + previousFrameData[i+2]) / 3;
+                const brightnessNew = (currentFrame[i] + currentFrame[i+1] + currentFrame[i+2]) / 3;
+                
+                if (Math.abs(brightnessOld - brightnessNew) > PIXEL_THRESHOLD) {
+                    pixelsChanged++;
+                }
+            }
+        }
+        previousFrameData = currentFrame;
+
+        // Comprobación de umbral de área (Hipersensible al 1%)
+        if (pixelsChanged > (80 * 80 * AREA_PERCENTAGE)) {
+            updateStatus("⚠️ MOVIMIENTO DETECTADO", "text-red-500", "bg-red-600");
+            startAlarmSequence();
+        } else if (!isAlarmRunning) {
+            updateStatus("VIGILANCIA ACTIVA", "text-green-500", "bg-green-700");
+        }
+        
+        // Escaneo de alta frecuencia (cada 80ms)
+        setTimeout(analyze, 50);
+    }
+
+    // --- MANEJO DE CÁMARA E INTERFAZ ---
+    async function setupCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: currentFacingMode, width: 1280, height: 720 } 
+            });
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                roiCanvas.width = video.clientWidth;
+                roiCanvas.height = video.clientHeight;
+                analyze();
+            };
+        } catch (e) { addLog("Error de cámara: " + e.message, "alert"); }
+    }
+
+    document.getElementById('threshold-range').oninput = function() {
+        PIXEL_THRESHOLD = parseInt(this.value);
+        document.getElementById('range-val').innerText = this.value;
+    };
+
+    function getCoords(e) {
+        const rect = roiCanvas.getBoundingClientRect();
+        const cx = e.touches ? e.touches[0].clientX : e.clientX;
+        const cy = e.touches ? e.touches[0].clientY : e.clientY;
+        return [(cx - rect.left) / rect.width, (cy - rect.top) / rect.height];
+    }
+
+    roiCanvas.addEventListener('pointerdown', e => {
+        isDrawing = true;
+        [startX, startY] = getCoords(e);
+        roi = { x: startX, y: startY, w: 0, h: 0 };
+    });
+
+    window.addEventListener('pointermove', e => {
+        if (!isDrawing) return;
+        const [currX, currY] = getCoords(e);
+        roi.w = currX - startX;
+        roi.h = currY - startY;
+        const ctx = roiCanvas.getContext('2d');
+        ctx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([5, 5]);
+        ctx.strokeRect(roi.x * roiCanvas.width, roi.y * roiCanvas.height, roi.w * roiCanvas.width, roi.h * roiCanvas.height);
+        document.getElementById('roi-status-text').innerText = "ZONA PERSONALIZADA";
+    });
+
+    window.addEventListener('pointerup', () => { isDrawing = false; });
+
+    function resetROI() {
+        roi = null;
+        roiCanvas.getContext('2d').clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+        document.getElementById('roi-status-text').innerText = "ESCANEO TOTAL";
+        addLog("Zona de vigilancia restablecida");
+    }
+
+    function switchCamera() {
+        if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+        currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+        setupCamera();
+    }
+
+    function addLog(msg, type='info') {
+        const div = document.createElement('div');
+        div.className = `log-entry ${type==='alert'?'text-red-600 font-bold':'text-zinc-500'}`;
+        div.innerText = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`;
+        logContainer.prepend(div);
+        if(logContainer.children.length > 10) logContainer.lastChild.remove();
+    }
+
+    function updateStatus(text, colorClass, pingColor) {
+        dashStatus.innerHTML = `<span class="w-2 h-2 ${pingColor} rounded-full mr-2 animate-ping"></span> ${text}`;
+        dashStatus.className = `text-[10px] font-black flex items-center tracking-widest ${colorClass}`;
+    }
+
+    setInterval(() => { document.getElementById('dash-clock').innerText = new Date().toLocaleTimeString(); }, 1000);
+</script>
+</body>
+</html>
